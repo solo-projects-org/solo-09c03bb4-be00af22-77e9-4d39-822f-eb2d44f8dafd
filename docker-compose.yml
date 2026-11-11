@@ -8,6 +8,9 @@ services:
       PAGE_SIZE: "10"
       PORT: "8080"
       TOKEN_TTL: "3600"
+      # 每次翻页响应前固定睡眠 2 秒：补采持锁窗口拉长，方便演示重叠请求收到 409。
+      # 也可在运行时通过 POST /admin/slow?seconds=N 动态调整，0 表示关闭。
+      PAGE_DELAY: "2"
       BASE_URL: "http://oai-source:8080/oai"
     ports:
       - "8080:8080"
@@ -17,7 +20,7 @@ services:
       timeout: 5s
       retries: 5
 
-  harvester-api:
+  harvester-api-a:
     build:
       context: .
       dockerfile: app/Dockerfile
@@ -30,6 +33,30 @@ services:
       APP_DB_PATH: "/data/harvester.db"
     ports:
       - "8000:8000"
+    volumes:
+      - harvester-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 第二个采集实例：与实例 A 挂载同一个命名卷、同一个 SQLite 文件，
+  # 模拟两笔重叠请求落到不同进程。任一实例同一时刻只允许一笔补采，
+  # 重叠方立即收到 409，不请求 OAI 源、也不新增运行记录。
+  harvester-api-b:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    image: union-catalog/harvester-api:latest
+    depends_on:
+      oai-source:
+        condition: service_healthy
+    environment:
+      OAI_ENDPOINT: "http://oai-source:8080/oai"
+      APP_DB_PATH: "/data/harvester.db"
+    ports:
+      - "8001:8000"
     volumes:
       - harvester-data:/data
     healthcheck:

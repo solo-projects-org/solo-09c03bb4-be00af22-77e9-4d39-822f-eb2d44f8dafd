@@ -35,9 +35,10 @@ app = FastAPI(
         "通过 OAI-PMH ListRecords(oai_dc) 按日期补采单馆书目。\n\n"
         "- 首次采集另填起始日；之后从上次成功采集的截止日（含当天）续采\n"
         "- 续页只用 resumptionToken；令牌失效则丢弃已取页、按原区间重抓一次\n"
-        "- 整批采完才在一个事务内提交书目变更和截止日，无匹配也推进截止日"
+        "- 整批采完才在一个事务内提交书目变更和截止日，无匹配也推进截止日\n"
+        "- 同一 SQLite 库同一时刻只允许一笔补采，重叠请求立即返回 409"
     ),
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -57,6 +58,10 @@ def _validate_iso_date(value: str, field: str) -> str:
     response_model=HarvestResponse,
     summary="发起一次补采",
     tags=["采集"],
+    responses={
+        409: {"description": "同一 SQLite 库已有补采在执行，重叠请求被拒绝"},
+        502: {"description": "OAI-PMH 源错误，本批已整体回滚"},
+    },
 )
 def trigger_harvest(req: HarvestRequest) -> HarvestResponse:
     _validate_iso_date(req.until_date, "截止日")
@@ -75,7 +80,14 @@ def trigger_harvest(req: HarvestRequest) -> HarvestResponse:
                 from_date=req.from_date,
             )
         except HarvestConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            # 重叠补采：未请求 OAI 源、未写运行记录，立即返回 409
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": str(exc),
+                    "hint": "请等待当前补采提交后，用相同的截止日重新发起即可续采",
+                },
+            ) from exc
         except OAIError as exc:
             raise HTTPException(
                 status_code=502,

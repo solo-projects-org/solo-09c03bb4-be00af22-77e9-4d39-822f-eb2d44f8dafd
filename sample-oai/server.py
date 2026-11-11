@@ -3,19 +3,22 @@
 
 提供：
   GET/POST /oai                      OAI-PMH 接口（ListRecords 支持日期 + resumptionToken 分页）
-  GET      /admin/state              查看令牌库与故障开关状态
+  GET      /admin/state              查看令牌库、故障开关、翻页延迟与请求计数
   POST     /admin/fail-next          令下一次使用 resumptionToken 的请求返回 badResumptionToken
-  POST     /admin/reset              清除故障开关与过期令牌
+  POST     /admin/slow?seconds=N     设置每次 ListRecords 响应前的延迟（放慢翻页，便于演示重叠）
+  POST     /admin/reset              清除故障开关、延迟与过期令牌，并清零请求计数
 
 环境变量：
   PAGE_SIZE   每页记录数，默认 10
   PORT        监听端口，默认 8080
   TOKEN_TTL   resumptionToken 有效期秒数，默认 3600
+  PAGE_DELAY  每次翻页响应前固定睡眠秒数，默认 0（可由 /admin/slow 动态调整）
 """
 from __future__ import annotations
 
 import os
 import threading
+import time
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
@@ -39,7 +42,39 @@ ET.register_namespace("xsi", XSI_NS)
 PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "10"))
 PORT = int(os.environ.get("PORT", "8080"))
 TOKEN_TTL = int(os.environ.get("TOKEN_TTL", "3600"))
+PAGE_DELAY = float(os.environ.get("PAGE_DELAY", "0"))
 BASE_URL = os.environ.get("BASE_URL", f"http://oai-source:{PORT}/oai")
+
+# 运行期可变状态：翻页延迟与请求计数（测试与演示用）
+_runtime_lock = threading.Lock()
+_runtime = {"page_delay": PAGE_DELAY, "request_count": 0}
+
+
+def get_page_delay() -> float:
+    with _runtime_lock:
+        return _runtime["page_delay"]
+
+
+def set_page_delay(seconds: float) -> None:
+    with _runtime_lock:
+        _runtime["page_delay"] = max(0.0, seconds)
+
+
+def bump_request_count() -> int:
+    with _runtime_lock:
+        _runtime["request_count"] += 1
+        return _runtime["request_count"]
+
+
+def get_request_count() -> int:
+    with _runtime_lock:
+        return _runtime["request_count"]
+
+
+def reset_runtime() -> None:
+    with _runtime_lock:
+        _runtime["page_delay"] = PAGE_DELAY
+        _runtime["request_count"] = 0
 
 
 def _build_records() -> list[dict]:
@@ -119,6 +154,8 @@ class TokenStore:
                 "record_count": len(RECORDS),
                 "active_tokens": len(self._tokens),
                 "fail_next_token": self.fail_next_token,
+                "page_delay_seconds": get_page_delay(),
+                "list_records_requests": get_request_count(),
             }
 
 
@@ -198,6 +235,11 @@ def _parse_date(value: str | None) -> str | None:
 
 
 def _list_records(qs: dict) -> bytes:
+    bump_request_count()
+    delay = get_page_delay()
+    if delay:
+        # 放慢翻页：让补采长时间持有采集锁，便于演示重叠请求收到 409
+        time.sleep(delay)
     token_value = qs.get("resumptionToken", [None])[0]
     if token_value is not None:
         # 续页请求：只允许 resumptionToken，日期/格式参数必须由令牌替代
@@ -398,9 +440,27 @@ class Handler(BaseHTTPRequestHandler):
                 {"ok": True, "message": "下一次 resumptionToken 请求将返回 badResumptionToken"}
             )
             return
+        if path == "/admin/slow":
+            qs_slow = parse_qs(
+                urlparse(self.path).query, keep_blank_values=True
+            )
+            try:
+                seconds = float(qs_slow.get("seconds", ["2"])[0])
+            except ValueError:
+                self._send_json(
+                    {"ok": False, "message": "seconds 必须是数字"}, status=400
+                )
+                return
+            set_page_delay(seconds)
+            self._send_json(
+                {"ok": True, "page_delay_seconds": get_page_delay(),
+                 "message": f"每次 ListRecords 响应前延迟 {get_page_delay()} 秒"}
+            )
+            return
         if path == "/admin/reset":
             TOKENS.reset()
-            self._send_json({"ok": True, "message": "令牌库与故障开关已重置"})
+            reset_runtime()
+            self._send_json({"ok": True, "message": "令牌库、故障开关、延迟与计数已重置"})
             return
         if path != "/oai":
             self._send_xml(_error_response({}, "badVerb", f"未知路径：{path}"), 404)

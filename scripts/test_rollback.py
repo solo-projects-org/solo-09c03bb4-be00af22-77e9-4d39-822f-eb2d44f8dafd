@@ -28,6 +28,8 @@ class FlakyClient(OAIClient):
 
 from app import db, harvester  # noqa: E402
 
+# 让采集锁与默认连接都指向本脚本的临时库（采集锁从模块级 DB_PATH 取路径）
+db.DB_PATH = "/tmp/e2e/data/failtest.db"
 db.init_db("/tmp/e2e/data/failtest.db")
 before = db.get_last_until(db.get_connection("/tmp/e2e/data/failtest.db"))
 print("采集前 last_until:", before)

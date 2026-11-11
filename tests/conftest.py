@@ -33,6 +33,8 @@ def oai_server(monkeypatch, tmp_path):
     monkeypatch.setattr(server_mod, "PAGE_SIZE", 10)
     monkeypatch.setattr(server_mod, "TOKEN_TTL", 3600)
     monkeypatch.setattr(server_mod, "TOKENS", server_mod.TokenStore())
+    # 每个测试重置翻页延迟与请求计数，避免相互污染
+    server_mod.reset_runtime()
     httpd = ThreadingHTTPServer(("127.0.0.1", port), server_mod.Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -42,6 +44,7 @@ def oai_server(monkeypatch, tmp_path):
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
+        server_mod.reset_runtime()
 
 
 @pytest.fixture()
